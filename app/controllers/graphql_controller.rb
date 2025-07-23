@@ -11,6 +11,7 @@ class GraphqlController < ApplicationController
     query = params[:query]
     operation_name = params[:operationName]
     context = {
+      logger: false,
       # Query context goes here, for example:
       current_user: pundit_user,
       pundit_user: pundit_user

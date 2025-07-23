@@ -13,39 +13,74 @@ end
 
 ActiveRecord::Relation.prepend(AllocationTracing)
 Fiber.prepend(AllocationTracing)
+GraphQL::Query::Context.prepend(AllocationTracing)
 
-def print_allocations(klass = nil)
-  counts = Hash.new(0)
-  ObjectSpace.each_object(klass || Object) { |obj| counts[obj.class] += 1 }
-  puts counts.sort_by { |_k, v| -v }.first(30).inspect
-end
 
-def aggressive_gc!
-  # Run full GC cycles until no more objects are freed
-  loop do
-    before = GC.stat(:total_freed_objects)
-    GC.start(full_mark: true, immediate_sweep: true, immediate_mark: true)
-    break if GC.stat(:total_freed_objects) == before
-  end
-  GC.compact
-end
+# A debugging module for tracking and analyzing Fiber objects in Ruby applications.
+# Provides utilities for counting live/dead fibers, performing aggressive garbage collection,
+# and analyzing object allocations with a focus on GraphQL and ActiveRecord components.
+class FiberDebugging
+  class << self
+    # Returns the count of currently alive Fiber objects in the ObjectSpace.
+    #
+    # @return [Integer] the number of alive fibers
+    def alive_count
+      ObjectSpace.each_object(Fiber).count { it.alive? }
+    end
 
-def print_fiber_allocations
-  ObjectSpace.each_object(Class) do |klass|
-    # Check if it's a subclass of ActiveRecord::Relation
-    next unless klass == Fiber
+    # Returns the count of dead Fiber objects in the ObjectSpace.
+    #
+    # @return [Integer] the number of dead fibers
+    def dead_count
+      ObjectSpace.each_object(Fiber).count { !it.alive? }
+    end
 
-    # Iterate over all instances of that class
-    ObjectSpace.each_object(klass) do |obj|
-      next if obj.alive?
-      puts "--"
-      puts "#{klass} (now dead) was allocated at #{obj.allocation_backtrace.join("\n")}" if obj.allocation_backtrace
-      
+    # Returns the total count of all Fiber objects in the ObjectSpace.
+    #
+    # @return [Integer] the total number of fibers (alive + dead)
+    def total_count
+      ObjectSpace.each_object(Fiber).count
+    end
+
+    # Executes a block with aggressive garbage collection disabled, then performs
+    # multiple full GC cycles until no more objects can be freed, followed by compaction.
+    #
+    # @yield [block] the block to execute during GC disabled state
+    # @return [Object] the result of the yielded block
+    def with_aggressive_gc(&block)
+      result = nil
+      GC.disable
+      result = yield
+
+      # Aggressive GC
+      size = GC.stat[:heap_live_slots]
+      loop do
+        GC.start(full_mark: true, immediate_sweep: true)
+        new_size = GC.stat[:heap_live_slots]
+        break if new_size >= size
+        size = new_size
+      end
+
+      GC.compact
+      result
+    end
+
+    # Prints the top 30 most allocated object classes and their counts.
+    #
+    # @param klass [Class, nil] optional class to filter objects by, defaults to Object
+    # @return [void]
+    def print_allocations(klass = nil)
+      klass ||= Object
+      puts "# Allocations for #{klass}:"
+      ObjectSpace.each_object(klass)
+        .group_by(&:class)
+        .transform_values(&:count)
+        .sort_by { |k, v| -v }
+        .first(30)
+        .each { |k, v| puts "#{v}: #{k}" }
     end
   end
 end
-ObjectSpace.trace_object_allocations_start
-
 
 RSpec.describe Resolvers::Appointments do
   include_context 'with_organization'
@@ -90,44 +125,56 @@ RSpec.describe Resolvers::Appointments do
       GQL
     end
 
-    describe 'increases dead fiber count consistently without cleanup even on forced GC' do
+    # NOTE: These specs are all "reversed" as in, they test that it behaves
+    # incorrectly — these tests should ALL fail
+    describe 'with forced garbage collection' do
 
       subject do
-        ExampleappSchema.execute(
-          query,
-          variables: {},
-          context: {
-            current_user: Pundit::User.new(family.users.first),
-            pundit_user: Pundit::User.new(family.users.first),
-          }
-        ).to_h.dig('data', 'appointments', 'edges').map { _1.dig('node') }
-        
-        # Force garbage collection to see if fibers are cleaned up
-        aggressive_gc!
-        fiber_count = ObjectSpace.each_object(Fiber).count
-        alive_count = ObjectSpace.each_object(Fiber).count { it.alive? }
-        dead_count = ObjectSpace.each_object(Fiber).count { !it.alive? }
-        puts "Memory used: #{ObjectSpace.memsize_of_all}"
-        # print_fiber_allocations
+        FiberDebugging.with_aggressive_gc do
+          gql = ExampleappSchema.execute(
+            query,
+            variables: {},
+            context: {
+              current_user: Pundit::User.new(family.users.first),
+              pundit_user: Pundit::User.new(family.users.first),
+            }
+          )
+          # Try to force dataloader cleanup (this doesnt make a difference)
+          gql.context.dataloader.clear_cache
+          gql.context.dataloader.cleanup_fiber
+        end
+          
         # print_allocations 
-        { alive: alive_count, dead: dead_count, total: fiber_count }
+        { alive: FiberDebugging.alive_count, dead: FiberDebugging.dead_count, total: FiberDebugging.total_count }
       end
 
       
-      # I presume that once the controller is finished with the request,
-      # and fibers are no longer needed, they should be cleaned up on
-      # a forced GC and we should see at most 1 alive fiber (main thread)
-      # and no dead fibers.
-      # 
-      # What we actually see here is 20 dead fibers and 1 alive
-      it { is_expected.to eq({ alive: 1, total: 21, dead: 20 }) }
+      describe 'keeps dangling query and multiplex objects in ObjectSpace' do
+        # We expect all GraphQL::Execution::Multiplex and GraphQL::Query objects to be cleaned up
+        # after the request is done, and all fibers to be dead, but they are still referenced somewhere,
+        # and they hold a context, which holds a dataloader, which I believe holds fiber references
+        it 'still has multiplex and query objects dangling' do
+          subject
+          expect(ObjectSpace.each_object(GraphQL::Execution::Multiplex).count).to eq(1)
+          expect(ObjectSpace.each_object(GraphQL::Query).count).to eq(1)
+        end
+      end
 
-      # Fire another request and watch it grow
-      it { is_expected.to eq({ alive: 1, total: 41, dead: 40 }) }
 
-      1000.times.each_with_index do |idx|
-        next if idx.zero?
-        it { is_expected.to eq({ alive: 1, total: 41 + idx * 20, dead: 40 + idx * 20 }) }
+      describe 'doesnt clean up dead fibers' do
+        # I presume that once the controller is finished with the request,
+        # and fibers are no longer needed, they should be cleaned up on
+        # a forced GC and we should see at most 1 alive fiber (main thread)
+        # and no dead fibers.
+        # 
+        # What we actually see here is 20 dead fibers and 1 alive
+
+        # Fire another request and watch it grow
+
+        100.times.each_with_index do |idx|
+          next if idx < 2
+          it { is_expected.to eq({ alive: 1, total: 1 + (idx * 20), dead: (idx * 20) }) }
+        end
       end
     end
   end

@@ -25,7 +25,7 @@ gem 'drb'
 source 'https://gems.graphql.pro' do
   gem 'graphql-pro'
 end
-gem 'graphql', '~>2.5.11'
+gem 'graphql', '~>2.4.6'
 gem 'graphql-c_parser'
 gem 'globalid'
 gem 'async'
