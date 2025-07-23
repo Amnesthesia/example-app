@@ -1,10 +1,50 @@
 require 'rails_helper'
 
+module AllocationTracing
+  def initialize(*args, **kwargs, &block)
+    super
+    @allocation_backtrace = caller
+  end
+
+  def allocation_backtrace
+    @allocation_backtrace
+  end
+end
+
+ActiveRecord::Relation.prepend(AllocationTracing)
+Fiber.prepend(AllocationTracing)
+
 def print_allocations(klass = nil)
   counts = Hash.new(0)
   ObjectSpace.each_object(klass || Object) { |obj| counts[obj.class] += 1 }
   puts counts.sort_by { |_k, v| -v }.first(30).inspect
 end
+
+def aggressive_gc!
+  # Run full GC cycles until no more objects are freed
+  loop do
+    before = GC.stat(:total_freed_objects)
+    GC.start(full_mark: true, immediate_sweep: true, immediate_mark: true)
+    break if GC.stat(:total_freed_objects) == before
+  end
+  GC.compact
+end
+
+def print_fiber_allocations
+  ObjectSpace.each_object(Class) do |klass|
+    # Check if it's a subclass of ActiveRecord::Relation
+    next unless klass == Fiber
+
+    # Iterate over all instances of that class
+    ObjectSpace.each_object(klass) do |obj|
+      next if obj.alive?
+      puts "--"
+      puts "#{klass} (now dead) was allocated at #{obj.allocation_backtrace.join("\n")}" if obj.allocation_backtrace
+      
+    end
+  end
+end
+ObjectSpace.trace_object_allocations_start
 
 
 RSpec.describe Resolvers::Appointments do
@@ -63,11 +103,12 @@ RSpec.describe Resolvers::Appointments do
         ).to_h.dig('data', 'appointments', 'edges').map { _1.dig('node') }
         
         # Force garbage collection to see if fibers are cleaned up
-        GC.start
+        aggressive_gc!
         fiber_count = ObjectSpace.each_object(Fiber).count
         alive_count = ObjectSpace.each_object(Fiber).count { it.alive? }
         dead_count = ObjectSpace.each_object(Fiber).count { !it.alive? }
         puts "Memory used: #{ObjectSpace.memsize_of_all}"
+        # print_fiber_allocations
         # print_allocations 
         { alive: alive_count, dead: dead_count, total: fiber_count }
       end

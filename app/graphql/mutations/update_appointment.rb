@@ -4,8 +4,8 @@ module Mutations
     argument :id, ID, required: true,
                as: :appointment,
                loads: Types::AppointmentType,
-               prepare: ->(id, _ctx) { Appointment.global_id_for(id) },
-               pundit_role: :update
+               pundit_role: :update,
+               prepare: ->(id, _ctx) { Appointment.global_id_for(id) }
     argument :time_range, Types::TimeRangeInput, required: false
     argument :state, Types::AppointmentStateType, required: false
 

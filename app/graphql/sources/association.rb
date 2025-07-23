@@ -82,20 +82,13 @@ class Sources::Association < ::GraphQL::Dataloader::ActiveRecordAssociationSourc
   end
 
   def fetch(records)
-    if self.subdomain
-      # Ensure we switch to the correct tenant if subdomain is provided
-      ::Apartment::Tenant.switch(self.subdomain) do
-        fetch_items(records)
-      end
-    else
-      fetch_items(records)
-    end
+    fetch_items(records)
   # Re-raise critical exceptions to avoid swallowing them
   rescue SystemStackError, FiberError, SignalException, SyntaxError, NoMemoryError, LoadError => critical_exception
     raise critical_exception
   # Rescue other exceptions to avoid leaving this Fiber dangling
   rescue => error
-    Appsignal.report_error(error)
+    Rails.logger.error("Error in Sources::Association: #{error.message}")
     records.map { nil }
   end
 

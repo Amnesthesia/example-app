@@ -7,7 +7,7 @@ class Types::AppointmentType < Types::Base::Object
   field :start_time, GraphQL::Types::ISO8601DateTime, null: false
   field :end_time, GraphQL::Types::ISO8601DateTime, null: false
   field :visibility, Types::VisibilityType, null: false
-  field :appointment_guests, [Types::AppointmentGuestType], null: false, pundit_role: nil
+  field :appointment_guests, [Types::AppointmentGuestType], null: false#, pundit_role: nil
 
   async_field :owner, Types::UserType
 end
