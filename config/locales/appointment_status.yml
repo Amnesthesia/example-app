@@ -1,0 +1,10 @@
+en:
+  enumerations:
+    appointment_status:
+      draft: 'Draft'
+      scheduled: 'Scheduled'
+      confirmed: 'Confirmed'
+      missed: 'Missed'
+      cancelled: 'Cancelled'
+      rejected: 'Rejected'
+      completed: 'Completed'

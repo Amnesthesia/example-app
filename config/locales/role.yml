@@ -1,0 +1,7 @@
+en:
+  enumerations:
+    role:
+      admin: 'Admin'
+      manager: 'Manager'
+      employee: 'Employee'
+      client: 'Client'
